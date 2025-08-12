@@ -25,11 +25,8 @@ env:
 
 jobs:
   build:
-    # 重点: 原始脚本使用 self-hosted。如果您的自托管服务器磁盘空间充足，
-    # 强烈建议禁用下面的磁盘清理步骤，因为它们是不必要的，并可能删除服务器上的重要软件。
-    # 如果您切换到 GitHub 托管的 runner (如 ubuntu-22.04)，请取消注释这些步骤。
-    runs-on: self-hosted
-    # runs-on: ubuntu-22.04
+    # runs-on: self-hosted
+    runs-on: ubuntu-22.04
 
     steps:
     - name: 1. Checkout repository
