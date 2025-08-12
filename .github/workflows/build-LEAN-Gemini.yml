@@ -32,40 +32,7 @@ jobs:
     - name: 1. Checkout repository
       uses: actions/checkout@v4 # 使用版本标签v4替代main，更稳定
 
-    - name: 2. Check machine configuration
-      if: runner.os == 'Linux' # 仅在Linux环境下运行
-      run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo "云编译建议取消勾选Node.js及其相关插件！"
-        echo "-------------------------- CPU INFO --------------------------"
-        echo "CPU Model: $(cat /proc/cpuinfo | grep 'model name' | uniq | sed -e 's/.*: //')"
-        echo "CPU Cores: $(nproc)"
-        echo "-------------------------- MEMORY INFO -------------------------"
-        sudo lshw -short -C memory | grep GiB || echo "Memory info not available"
-        echo "-------------------------- DISK INFO ---------------------------"
-        df -hT
-        echo "=============================================================================="
-
-    # ------------------------------------------------------------------------------------
-    # 以下磁盘清理步骤主要针对 GitHub 托管的 Runner。
-    # 如果您使用空间充足的 self-hosted runner，可以安全地注释或删除它们。
-    # - name: Optimize Disk Space (For GitHub Hosted Runners)
-    #   uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
-    #   with:
-    #     operate_sudo: "True"
-    #     general_include: ".+"
-    #     general_exclude: |-
-    #       ^GCC$
-    #       ^G\+\+$
-    #       Clang
-    #       LLVM
-    #     docker_prune: "True"
-    #     docker_clean: "True"
-    #     apt_prune: "True"
-    #     apt_clean: "True"
-    # ------------------------------------------------------------------------------------
-
+    
     - name: 3. Initialize build environment
       env:
         DEBIAN_FRONTEND: noninteractive
