@@ -5,7 +5,7 @@
 # It is optimized for clarity, stability, and efficiency.
 # =================================================================
 
-name: Build OpenWRT-LEAN for N1
+name: Build OpenWRT-LEAN for N1 (Gemini)
 
 on:
   workflow_dispatch:
