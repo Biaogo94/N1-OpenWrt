@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "Kernel version (default: 5.15.176)"
+        description: "Kernel version (e.g., 5.15.176)"
         default: "5.15.176"
         required: false
 
@@ -21,186 +21,153 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
 
-    - name: CRITICAL DEBUG - List all files in workspace
-      run: |
-        echo "--- Current Working Directory: $(pwd) ---"
-        echo "--- GITHUB_WORKSPACE is: $GITHUB_WORKSPACE ---"
-        echo "--- Listing all files recursively... ---"
-        ls -laR
-        echo "--- End of file listing ---"
+      - name: 2. Clone OpenWrt source code
+        run: |
+          git clone --depth 1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          cd openwrt
+          sed -i 's|https://github.com/coolsnowwolf/luci.git;openwrt-23.05|https://github.com/coolsnowwolf/luci|g' feeds.conf.default
 
-    - name: Show initial disk usage
-      run: df -hT
-
-    # Step 1: Clean up space BEFORE heavy actions
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 1024
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Optimize Disk Space
-      uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-
-    - name: Show disk usage after cleanup
-      run: df -hT
-
-    # Step 2: Install dependencies
-    - name: Initialize build environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo apt-get update
-        sudo apt-get -y install \
-          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache clang cmake cpio curl device-tree-compiler fastjar flex gawk \
-          gettext genisoimage git gperf haveged help2man intltool libelf-dev libfuse-dev \
-          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
-          libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 \
-          python3 python3-pip python3-pyelftools python3-setuptools qemu-utils rsync \
-          scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
-          wget xmlto xxd zlib1g-dev gn
-        sudo apt-get -y autoremove --purge
-        sudo apt-get clean
-        sudo timedatectl set-timezone "$TZ"
-
-    # Step 3: Clone OpenWrt source code
-    - name: Clone OpenWrt source code
-      run: |
-        git clone --depth 1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
-        cd openwrt
-        sed -i 's|https://github.com/coolsnowwolf/luci.git;openwrt-23.05|https://github.com/coolsnowwolf/luci|g' feeds.conf.default
-
-    # Step 4: Setup build cache
-    - name: Setup cache for build
-      uses: stupidloud/cachewrtbuild@main
-      with:
-        ccache: 'true'
-        mixkey: amlogic-${{ env.REPO_BRANCH }}
-        prefix: ${{ github.workspace }}/openwrt
-
-    # Step 5: Update and install feeds
-    - name: Update and install feeds
-      working-directory: ./openwrt
-      run: |
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-
-    # Step 6: Load custom config + DIY script (safe mode)
-    - name: Load custom configuration and DIY script
-      run: |
-        # 先检查文件是否存在
-        if [ -d "$GITHUB_WORKSPACE/$FILES" ]; then
-          cp -rf "$GITHUB_WORKSPACE/$FILES" "$GITHUB_WORKSPACE/openwrt/files"
-        else
-          echo "⚠ $FILES not found, skipping."
-        fi
-    
-        if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$GITHUB_WORKSPACE/openwrt/.config"
-        else
-          echo "⚠ $CONFIG_FILE not found, skipping."
-        fi
-    
-        if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
-          chmod +x "$GITHUB_WORKSPACE/$DIY_SH"
-          cd "$GITHUB_WORKSPACE/openwrt"
-          "$GITHUB_WORKSPACE/$DIY_SH"
-        else
-          echo "❌ DIY script missing: $DIY_SH"
-          exit 1
-        fi
-
-
-    # Step 7: Download toolchain and packages
-    - name: Download toolchain and packages
-      working-directory: ./openwrt
-      run: |
-        make defconfig
-        make download -j$(nproc)
-        find dl -size -1024c -exec rm -f {} \;
-
-    # Step 8: Compile firmware
-    - name: Compile the firmware
-      run: |
-        cd openwrt
-        set +e
-        make -j$(nproc)
-        if [ $? -ne 0 ]; then
-          echo "Parallel build failed — retrying single thread..."
-          make -j1 V=s
-        fi
-        if [ $? -eq 0 ]; then
-          echo "compile_status=success" >> $GITHUB_ENV
-        else
-          echo "compile_status=failure" >> $GITHUB_ENV
-          exit 1
-        fi
-
-    # Step 9: Package firmware
-    - name: Package OpenWrt Firmware
-      if: env.compile_status == 'success'
-      uses: unifreq/openwrt_packit@master
-      env:
-        OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz
-        KERNEL_VERSION_NAME: ${{ github.event.inputs.kernel_version }}
-        KERNEL_AUTO_LATEST: false
-        PACKAGE_SOC: s905d
-        WHOAMI: fightroad
-        SW_FLOWOFFLOAD: 1
-        SFE_FLOW: 0
-
-    - name: Mark package status success
-      if: env.compile_status == 'success'
-      run: echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
-
-
-    # Step 10: Upload to GitHub Release
-    - name: Upload OpenWrt Firmware to Release
-      uses: ncipollo/release-action@v1
-      if: env.PACKAGED_STATUS == 'success'
-      with:
-        tag: OpenWrt_N1_${{ env.PACKAGED_OUTPUTDATE }}
-        name: OpenWrt for N1 | ${{ env.PACKAGED_OUTPUTDATE }}
-        artifacts: /opt/openwrt_packit/output/*
-        allowUpdates: true
-        token: ${{ secrets.GITHUB_TOKEN }}
-        body: |
-          **Firmware built from Lean's OpenWrt source**
+      - name: 3. Load Custom Config & DIY Script (CRITICAL STEP)
+        run: |
+          echo "### Loading custom files before any other operations ###"
           
-          Recommended for new installations.
-          
-          ### Default Access Info
-          - **IP Address:** 192.168.2.2
-          - **Username:** root
-          - **Password:** password
-          
-          *Built on: `${{ env.PACKAGED_OUTPUTDATE }}`*
+          # Check and copy files directory
+          if [ -d "$GITHUB_WORKSPACE/$FILES" ]; then
+            echo "Copying 'files' directory..."
+            cp -rf "$GITHUB_WORKSPACE/$FILES" "$GITHUB_WORKSPACE/openwrt/"
+          else
+            echo "::warning:: Custom 'files' directory not found, skipping."
+          fi
 
-    # Step 11: Cleanup old releases
-    - name: Delete old workflow runs and releases
-      uses: dev-drprasad/delete-older-releases@v0.3.1
-      if: always()
-      with:
-        keep_latest: 10
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Check and copy .config file
+          if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+            echo "Copying '.config' file..."
+            cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$GITHUB_WORKSPACE/openwrt/.config"
+          else
+            echo "::warning:: Custom '.config' file not found, skipping."
+          fi
+
+          # Check, make executable, and run diy.sh
+          if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
+            echo "Executing 'diy.sh'..."
+            chmod +x "$GITHUB_WORKSPACE/$DIY_SH"
+            cd "$GITHUB_WORKSPACE/openwrt"
+            "$GITHUB_WORKSPACE/$DIY_SH"
+          else
+            echo "::error:: DIY script missing: $DIY_SH. This is a fatal error."
+            exit 1
+          fi
+
+      - name: 4. Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+        
+      - name: 5. Show disk usage after cleanup
+        if: always()
+        run: df -hT
+
+      - name: 6. Initialize build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler fastjar flex gawk \
+            gettext genisoimage git gperf haveged help2man intltool libelf-dev libfuse-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
+            libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 \
+            python3 python3-pip python3-pyelftools python3-setuptools qemu-utils rsync \
+            scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
+            wget xmlto xxd zlib1g-dev gn
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: 7. Setup build cache
+        uses: stupidloud/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          mixkey: amlogic-${{ env.REPO_BRANCH }}-${{ github.run_id }}
+          prefix: ${{ github.workspace }}/openwrt
+
+      - name: 8. Update and install feeds
+        working-directory: ./openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 9. Download toolchain and packages
+        working-directory: ./openwrt
+        run: |
+          make defconfig
+          make download -j$(nproc)
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 10. Compile the firmware
+        working-directory: ./openwrt
+        run: |
+          echo "Starting firmware compilation with $(nproc) threads..."
+          set +e
+          make -j$(nproc)
+          if [ $? -ne 0 ]; then
+            echo "::warning:: Parallel compilation failed, retrying with single thread for verbose log..."
+            make -j1 V=s
+          fi
+
+          if [ -f "bin/targets/*/*/*-rootfs.tar.gz" ]; then
+              echo "::notice:: Firmware compilation successful!"
+              echo "compile_status=success" >> $GITHUB_ENV
+          else
+              echo "::error:: Firmware compilation failed."
+              echo "compile_status=failure" >> $GITHUB_ENV
+              exit 1
+          fi
+
+      - name: 11. Package OpenWrt Firmware
+        if: success() && env.compile_status == 'success'
+        uses: unifreq/openwrt_packit@master
+        env:
+          OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz
+          KERNEL_VERSION_NAME: ${{ github.event.inputs.kernel_version }}
+          PACKAGE_SOC: s905d
+          WHOAMI: fightroad
+
+      - name: 12. Mark package status success
+        if: success() && env.compile_status == 'success'
+        run: echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+
+      - name: 13. Upload OpenWrt Firmware to Release
+        uses: ncipollo/release-action@v1
+        if: success() && env.PACKAGED_STATUS == 'success'
+        with:
+          tag: OpenWrt_N1_${{ env.PACKAGED_OUTPUTDATE }}
+          name: OpenWrt for N1 | ${{ env.PACKAGED_OUTPUTDATE }}
+          artifacts: /opt/openwrt_packit/output/*
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            **Firmware built from Lean's OpenWrt source**
+            
+            ### Default Access Info
+            - **IP Address:** 192.168.2.2
+            - **Username:** root
+            - **Password:** password
+            
+            *Built on: `${{ env.PACKAGED_OUTPUTDATE }}`*
+
+      - name: 14. Delete old workflow runs and releases
+        uses: dev-drprasad/delete-older-releases@v0.3.1
+        if: always()
+        with:
+          keep_latest: 10
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
