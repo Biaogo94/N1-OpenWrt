@@ -1,20 +1,7 @@
-name: Build OpenWRT-LEAN for N1 (Gemini)
+name: Build OpenWrt for N1 (Gemini)
 
 on:
   workflow_dispatch:
-    inputs:
-      kernel_version:
-        description: "Kernel version (e.g., 5.15.176)"
-        default: "5.15.176"
-        required: false
-
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  CONFIG_FILE: N1-LEDE/.config
-  DIY_SH: N1-LEDE/diy.sh
-  FILES: N1-LEDE/files
-  TZ: Asia/Shanghai
 
 jobs:
   build:
@@ -24,44 +11,7 @@ jobs:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. Clone OpenWrt source code
-        run: |
-          git clone --depth 1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
-          cd openwrt
-          sed -i 's|https://github.com/coolsnowwolf/luci.git;openwrt-23.05|https://github.com/coolsnowwolf/luci|g' feeds.conf.default
-
-      - name: 3. Load Custom Config & DIY Script (CRITICAL STEP)
-        run: |
-          echo "### Loading custom files before any other operations ###"
-          
-          # Check and copy files directory
-          if [ -d "$GITHUB_WORKSPACE/$FILES" ]; then
-            echo "Copying 'files' directory..."
-            cp -rf "$GITHUB_WORKSPACE/$FILES" "$GITHUB_WORKSPACE/openwrt/"
-          else
-            echo "::warning:: Custom 'files' directory not found, skipping."
-          fi
-
-          # Check and copy .config file
-          if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-            echo "Copying '.config' file..."
-            cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$GITHUB_WORKSPACE/openwrt/.config"
-          else
-            echo "::warning:: Custom '.config' file not found, skipping."
-          fi
-
-          # Check, make executable, and run diy.sh
-          if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
-            echo "Executing 'diy.sh'..."
-            chmod +x "$GITHUB_WORKSPACE/$DIY_SH"
-            cd "$GITHUB_WORKSPACE/openwrt"
-            "$GITHUB_WORKSPACE/$DIY_SH"
-          else
-            echo "::error:: DIY script missing: $DIY_SH. This is a fatal error."
-            exit 1
-          fi
-
-      - name: 4. Maximize build space
+      - name: 2. Maximize build space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 1024
@@ -71,12 +21,11 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
-        
-      - name: 5. Show disk usage after cleanup
-        if: always()
+
+      - name: 3. Show disk usage after cleanup
         run: df -hT
 
-      - name: 6. Initialize build environment
+      - name: 4. Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get -y install \
@@ -89,81 +38,86 @@ jobs:
             python3 python3-pip python3-pyelftools python3-setuptools qemu-utils rsync \
             scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
             wget xmlto xxd zlib1g-dev gn
-          sudo timedatectl set-timezone "$TZ"
+          sudo timedatectl set-timezone Asia/Shanghai
 
-      - name: 7. Setup build cache
-        uses: stupidloud/cachewrtbuild@main
-        with:
-          ccache: 'true'
-          mixkey: amlogic-${{ env.REPO_BRANCH }}-${{ github.run_id }}
-          prefix: ${{ github.workspace }}/openwrt
-
-      - name: 8. Update and install feeds
+      - name: 5. Clone OpenWrt source code
+        run: |
+          git clone --depth 1 https://github.com/coolsnowwolf/lede -b master openwrt
+      
+      - name: 6. Load custom files & Run DIY script
+        run: |
+          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/
+          [ -f "N1-LEDE/.config" ] && cp N1-LEDE/.config openwrt/
+          if [ -f "N1-LEDE/diy.sh" ]; then
+            chmod +x N1-LEDE/diy.sh
+            cd openwrt
+            ../N1-LEDE/diy.sh
+          else
+            echo "::error:: diy.sh not found!"
+            exit 1
+          fi
+        
+      - name: 7. Update and install feeds
         working-directory: ./openwrt
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          echo "### Disk space after feeds install ###"
+          df -hT
 
-      - name: 9. Download toolchain and packages
+      - name: 8. Download packages
         working-directory: ./openwrt
         run: |
           make defconfig
           make download -j$(nproc)
           find dl -size -1024c -exec rm -f {} \;
+          echo "### Disk space after download ###"
+          df -hT
 
-      - name: 10. Compile the firmware
+      - name: 9. Compile the firmware
+        id: compile
         working-directory: ./openwrt
         run: |
-          echo "Starting firmware compilation with $(nproc) threads..."
-          set +e
-          make -j$(nproc)
-          if [ $? -ne 0 ]; then
-            echo "::warning:: Parallel compilation failed, retrying with single thread for verbose log..."
-            make -j1 V=s
-          fi
+          echo "Starting firmware compilation..."
+          make -j$(nproc) || make -j1 V=s
+          echo "compile_status=$?" >> $GITHUB_OUTPUT
+          echo "### Disk space after compile ###"
+          df -hT
 
-          if [ -f "bin/targets/*/*/*-rootfs.tar.gz" ]; then
-              echo "::notice:: Firmware compilation successful!"
-              echo "compile_status=success" >> $GITHUB_ENV
-          else
-              echo "::error:: Firmware compilation failed."
-              echo "compile_status=failure" >> $GITHUB_ENV
-              exit 1
-          fi
+      - name: 10. CRITICAL - Free up disk space after build
+        if: steps.compile.outputs.compile_status == '0'
+        working-directory: ./openwrt
+        run: |
+          echo "Firmware compiled. Cleaning up build artifacts..."
+          rm -rf build_dir
+          rm -rf tmp
+          echo "### Disk space after cleanup ###"
+          df -hT
 
-      - name: 11. Package OpenWrt Firmware
-        if: success() && env.compile_status == 'success'
+      - name: 11. Package the firmware
+        if: steps.compile.outputs.compile_status == '0'
         uses: unifreq/openwrt_packit@master
         env:
           OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz
-          KERNEL_VERSION_NAME: ${{ github.event.inputs.kernel_version }}
           PACKAGE_SOC: s905d
           WHOAMI: fightroad
 
-      - name: 12. Mark package status success
-        if: success() && env.compile_status == 'success'
+      - name: 12. Set packaging status
+        if: steps.compile.outputs.compile_status == '0'
         run: echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
 
-      - name: 13. Upload OpenWrt Firmware to Release
+      - name: 13. Upload to Release
         uses: ncipollo/release-action@v1
-        if: success() && env.PACKAGED_STATUS == 'success'
+        if: env.PACKAGED_STATUS == 'success'
         with:
           tag: OpenWrt_N1_${{ env.PACKAGED_OUTPUTDATE }}
           name: OpenWrt for N1 | ${{ env.PACKAGED_OUTPUTDATE }}
           artifacts: /opt/openwrt_packit/output/*
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
-          body: |
-            **Firmware built from Lean's OpenWrt source**
-            
-            ### Default Access Info
-            - **IP Address:** 192.168.2.2
-            - **Username:** root
-            - **Password:** password
-            
-            *Built on: `${{ env.PACKAGED_OUTPUTDATE }}`*
+          body: "Lean OpenWrt build for Phicomm N1"
 
-      - name: 14. Delete old workflow runs and releases
+      - name: 14. Delete old releases
         uses: dev-drprasad/delete-older-releases@v0.3.1
         if: always()
         with:
