@@ -99,18 +99,19 @@ jobs:
     # Step 6: Load custom config + DIY script (safe mode)
     - name: Load custom configuration and DIY script
       run: |
+        # 先检查文件是否存在
         if [ -d "$GITHUB_WORKSPACE/$FILES" ]; then
-          mv "$GITHUB_WORKSPACE/$FILES" "$GITHUB_WORKSPACE/openwrt/files"
+          cp -rf "$GITHUB_WORKSPACE/$FILES" "$GITHUB_WORKSPACE/openwrt/files"
         else
           echo "⚠ $FILES not found, skipping."
         fi
-
+    
         if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          mv "$GITHUB_WORKSPACE/$CONFIG_FILE" "$GITHUB_WORKSPACE/openwrt/.config"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$GITHUB_WORKSPACE/openwrt/.config"
         else
           echo "⚠ $CONFIG_FILE not found, skipping."
         fi
-
+    
         if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
           chmod +x "$GITHUB_WORKSPACE/$DIY_SH"
           cd "$GITHUB_WORKSPACE/openwrt"
@@ -119,6 +120,7 @@ jobs:
           echo "❌ DIY script missing: $DIY_SH"
           exit 1
         fi
+
 
     # Step 7: Download toolchain and packages
     - name: Download toolchain and packages
