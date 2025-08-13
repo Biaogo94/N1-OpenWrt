@@ -24,6 +24,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: CRITICAL DEBUG - List all files in workspace
+      run: |
+        echo "--- Current Working Directory: $(pwd) ---"
+        echo "--- GITHUB_WORKSPACE is: $GITHUB_WORKSPACE ---"
+        echo "--- Listing all files recursively... ---"
+        ls -laR
+        echo "--- End of file listing ---"
+
     - name: Show initial disk usage
       run: df -hT
 
