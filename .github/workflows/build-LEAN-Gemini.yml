@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: 1. Checkout repository
+    - name: Checkout repository
       uses: actions/checkout@v4 # 使用版本标签v4替代main，更稳定
       
     - name: Show initial disk usage
@@ -56,7 +56,7 @@ jobs:
     - name: Show disk usage after cleanup
       run: df -hT
     
-    - name: 3. Initialize build environment
+    - name: Initialize build environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
@@ -77,39 +77,35 @@ jobs:
         sudo apt-get clean
         sudo timedatectl set-timezone "$TZ"
 
-    - name: 4. Clone OpenWrt source code
+    - name: Clone OpenWrt source code
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
         # 修正 coolsnowwolf/luci 的源地址，以适应新的 openwrt-23.05 分支结构
         sed -i 's|https://github.com/coolsnowwolf/luci.git;openwrt-23.05|https://github.com/coolsnowwolf/luci|g' feeds.conf.default
 
-    - name: 5. Setup cache for build
+    - name: Setup cache for build
       uses: stupidloud/cachewrtbuild@main # 这个Action很方便，继续使用
       with:
         ccache: 'true'
         mixkey: amlogic-${{ env.REPO_BRANCH }}
         prefix: ${{ github.workspace }}/openwrt
 
-    - name: 6. Update and install feeds
+    - name: Update and install feeds
       working-directory: ./openwrt
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: 7. Load custom configuration and DIY script
+    - name: Load custom configuration and DIY script
       run: |
         [ -e "$FILES" ] && mv "$FILES" openwrt/files
         [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
         chmod +x "$DIY_SH"
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_SH
-    
-    # - name: SSH connection to Actions
-    #   uses: P3TERX/ssh2actions@v1.0.0
-    #   if: github.event.inputs.ssh == 'true'
 
-    - name: 8. Download toolchain and packages
+    - name: Download toolchain and packages
       working-directory: ./openwrt
       run: |
         make defconfig
@@ -118,7 +114,7 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: 9. Compile the firmware
+    - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
@@ -141,7 +137,7 @@ jobs:
           exit 1
         fi
 
-    - name: 10. Package OpenWrt Firmware
+    - name: Package OpenWrt Firmware
       id: package
       if: success() && env.compile_status == 'success'
       uses: unifreq/openwrt_packit@master # 该Action社区专用性强，保持不变
@@ -154,7 +150,7 @@ jobs:
         SW_FLOWOFFLOAD: 1
         SFE_FLOW: 0
 
-    - name: 11. Upload OpenWrt Firmware to Release
+    - name: Upload OpenWrt Firmware to Release
       uses: ncipollo/release-action@v1 # 使用版本标签v1替代main
       if: success() && env.PACKAGED_STATUS == 'success'
       with:
@@ -175,7 +171,7 @@ jobs:
           
           *Built on: `${{ env.PACKAGED_OUTPUTDATE }}`*
 
-    - name: 12. Delete old workflow runs and releases
+    - name: Delete old workflow runs and releases
       uses: dev-drprasad/delete-older-releases@v0.3.1 # 使用版本标签替代master
       if: always() # 无论前面是否成功，都尝试清理
       with:
