@@ -106,47 +106,32 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        echo "=============================================================================="
-        echo "加载自定义配置..."
-        echo "=============================================================================="
-        
-        # 复制 files 目录
-        if [ -d "$FILES" ]; then
-          echo "✓ 复制 files 目录"
-          cp -r $FILES openwrt/files
-          ls -la openwrt/files
+        echo "当前目录：$(pwd)"
+        echo "一级目录内容："; ls -l
+
+        if [ -d "N1-LEDE/files" ]; then
+          echo "复制 files 目录"
+          cp -r N1-LEDE/files openwrt/files
         else
-          echo "⚠ files 目录不存在: $FILES"
+          echo "⚠ files 目录不存在"
         fi
-        
-        # 复制配置文件
-        if [ -f "$CONFIG_FILE" ]; then
-          echo "✓ 复制配置文件: $CONFIG_FILE"
-          cp $CONFIG_FILE openwrt/.config
-        elif [ -f "N1-LEDE/.config" ]; then
-          echo "✓ 使用 N1-LEDE/.config"
-          cp N1-LEDE/.config openwrt/.config
+
+        if [ -f "N1-LEDE/.config-all" ]; then
+          echo "复制 .config-all 到 openwrt/.config"
+          cp N1-LEDE/.config-all openwrt/.config
         else
-          echo "✗ 错误: 找不到配置文件!"
-          echo "查找的路径: $CONFIG_FILE"
-          echo "当前目录内容:"
-          ls -la N1-LEDE/
-          exit 1
+          echo "✗ config 文件不存在"
+          exit 2
         fi
-        
-        # 执行自定义脚本
-        if [ -f "$DIY_SH" ]; then
-          echo "✓ 执行自定义脚本: $DIY_SH"
-          chmod +x $DIY_SH
+
+        if [ -f "N1-LEDE/diy.sh" ]; then
+          echo "设置 diy.sh 可执行并运行"
+          chmod +x N1-LEDE/diy.sh
           cd openwrt
-          bash $GITHUB_WORKSPACE/$DIY_SH
+          bash ../N1-LEDE/diy.sh
         else
-          echo "⚠ 自定义脚本不存在: $DIY_SH"
+          echo "⚠ diy.sh 文件不存在"
         fi
-        
-        echo "=============================================================================="
-        echo "配置加载完成"
-        echo "=============================================================================="
 
     - name: Generate configuration
       working-directory: ./openwrt
