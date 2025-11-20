@@ -3,6 +3,11 @@ name: Build OpenWrt for N1 (Gemini)
 on:
   workflow_dispatch:
 
+# 并发控制,避免多个构建同时运行
+concurrency:
+  group: build-openwrt-n1
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -14,7 +19,7 @@ jobs:
       - name: 2. Maximize build space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 1024
+          root-reserve-mb: 2048
           swap-size-mb: 1
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -42,12 +47,27 @@ jobs:
 
       - name: 5. Clone OpenWrt source code
         run: |
-          git clone --depth 1 https://github.com/coolsnowwolf/lede -b master openwrt
+          if [ ! -d "openwrt" ]; then
+            git clone --depth 1 https://github.com/coolsnowwolf/lede -b master openwrt
+          else
+            echo "OpenWrt directory already exists"
+          fi
       
       - name: 6. Load custom files & Run DIY script
         run: |
-          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/
-          [ -f "N1-LEDE/.config" ] && cp N1-LEDE/.config openwrt/
+          if [ ! -d "N1-LEDE" ]; then
+            echo "::error:: N1-LEDE directory not found!"
+            exit 1
+          fi
+          
+          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/ || echo "No custom files found"
+          
+          if [ ! -f "N1-LEDE/.config" ]; then
+            echo "::error:: .config file not found!"
+            exit 1
+          fi
+          cp N1-LEDE/.config openwrt/
+          
           if [ -f "N1-LEDE/diy.sh" ]; then
             chmod +x N1-LEDE/diy.sh
             cd openwrt
@@ -56,8 +76,27 @@ jobs:
             echo "::error:: diy.sh not found!"
             exit 1
           fi
+
+      - name: 7. Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/staging_dir/toolchain-*
+            openwrt/staging_dir/host
+            openwrt/build_dir/host
+          key: ${{ runner.os }}-openwrt-toolchain-${{ hashFiles('openwrt/.config') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-toolchain-
+
+      - name: 8. Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
         
-      - name: 7. Update and install feeds
+      - name: 9. Update and install feeds
         working-directory: ./openwrt
         run: |
           ./scripts/feeds update -a
@@ -65,7 +104,7 @@ jobs:
           echo "### Disk space after feeds install ###"
           df -hT
 
-      - name: 8. Download packages
+      - name: 10. Download packages
         working-directory: ./openwrt
         run: |
           make defconfig
@@ -74,39 +113,60 @@ jobs:
           echo "### Disk space after download ###"
           df -hT
 
-      - name: 9. Compile the firmware
+      - name: 11. Compile the firmware
         id: compile
         working-directory: ./openwrt
         run: |
+          export USE_CCACHE=1
+          export CCACHE_DIR=~/.ccache
           echo "Starting firmware compilation..."
           make -j$(nproc) || make -j1 V=s
           echo "compile_status=$?" >> $GITHUB_OUTPUT
           echo "### Disk space after compile ###"
           df -hT
 
-      - name: 10. CRITICAL - Free up disk space after build
+      - name: 12. Upload build logs on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-logs
+          path: openwrt/logs/
+          retention-days: 7
+
+      - name: 13. Clean up build artifacts
         if: steps.compile.outputs.compile_status == '0'
         working-directory: ./openwrt
         run: |
           echo "Firmware compiled. Cleaning up build artifacts..."
-          rm -rf build_dir
+          rm -rf build_dir/target-*
           rm -rf tmp
           echo "### Disk space after cleanup ###"
           df -hT
 
-      - name: 11. Package the firmware
+      - name: 14. Set packaging date
+        if: steps.compile.outputs.compile_status == '0'
+        run: |
+          echo "PACKAGED_OUTPUTDATE=$(date +%Y.%m.%d_%H%M)" >> $GITHUB_ENV
+
+      - name: 15. Package the firmware
         if: steps.compile.outputs.compile_status == '0'
         uses: unifreq/openwrt_packit@master
         env:
-          OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz
+          OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-armvirt-64-generic-rootfs.tar.gz
           PACKAGE_SOC: s905d
           WHOAMI: fightroad
+          KERNEL_AUTO_LATEST: true
 
-      - name: 12. Set packaging status
+      - name: 16. Set packaging status
         if: steps.compile.outputs.compile_status == '0'
-        run: echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+        run: |
+          if [ -d "/opt/openwrt_packit/output" ] && [ "$(ls -A /opt/openwrt_packit/output)" ]; then
+            echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
+          else
+            echo "PACKAGED_STATUS=failure" >> $GITHUB_ENV
+          fi
 
-      - name: 13. Upload to Release
+      - name: 17. Upload to Release
         uses: ncipollo/release-action@v1
         if: env.PACKAGED_STATUS == 'success'
         with:
@@ -115,10 +175,20 @@ jobs:
           artifacts: /opt/openwrt_packit/output/*
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
-          body: "Lean OpenWrt build for Phicomm N1"
+          body: |
+            **Lean OpenWrt 固件 for Phicomm N1**
+            
+            📅 编译时间: ${{ env.PACKAGED_OUTPUTDATE }}
+            🔧 SOC: s905d
+            📦 打包脚本: unifreq/openwrt_packit
+            
+            ### 安装方法
+            1. 将固件写入 U 盘
+            2. 插入 N1 盒子并从 U 盘启动
+            3. 运行 `openwrt-install-amlogic` 安装到 eMMC
 
-      - name: 14. Delete old releases
-        uses: dev-drprasad/delete-older-releases@v0.3.1
+      - name: 18. Delete old releases
+        uses: dev-drprasad/delete-older-releases@v0.3.4
         if: always()
         with:
           keep_latest: 10
