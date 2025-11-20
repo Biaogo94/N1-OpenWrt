@@ -3,7 +3,6 @@ name: Build OpenWrt for N1 (Gemini)
 on:
   workflow_dispatch:
 
-# 并发控制,避免多个构建同时运行
 concurrency:
   group: build-openwrt-n1
   cancel-in-progress: true
@@ -16,25 +15,25 @@ jobs:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          submodules: recursive
-      - name: 1.1 Verify directory structure
+          fetch-depth: 1
+
+      - name: 1.1 Debug - Verify repository structure
         run: |
-          echo "=== Current working directory ==="
+          echo "=== Current directory ==="
           pwd
           echo ""
-          echo "=== Directory contents ==="
-          ls -la
+          echo "=== All files in workspace ==="
+          ls -laR
           echo ""
-          echo "=== Checking N1-LEDE directory ==="
+          echo "=== Checking for N1-LEDE ==="
           if [ -d "N1-LEDE" ]; then
-            echo "✓ N1-LEDE found"
+            echo "✓ N1-LEDE directory found"
+            echo "Contents of N1-LEDE:"
             ls -la N1-LEDE/
           else
-            echo "✗ N1-LEDE NOT found"
-            echo "Available directories:"
-            find . -maxdepth 2 -type d
-            exit 1
+            echo "✗ N1-LEDE directory NOT found"
+            echo "All directories:"
+            find . -type d -maxdepth 2
           fi
 
       - name: 2. Maximize build space
@@ -76,24 +75,61 @@ jobs:
       
       - name: 6. Load custom files & Run DIY script
         run: |
-          # 验证必需文件
-          if [ ! -f "N1-LEDE/.config" ]; then
-            echo "::error:: N1-LEDE/.config file not found!"
-            ls -la N1-LEDE/ || echo "N1-LEDE directory is empty or inaccessible"
+          echo "=== Verifying N1-LEDE directory ==="
+          if [ ! -d "N1-LEDE" ]; then
+            echo "::error:: N1-LEDE directory not found!"
+            pwd
+            ls -la
             exit 1
           fi
           
+          echo "=== Contents of N1-LEDE ==="
+          ls -la N1-LEDE/
+          
+          # 检查配置文件 (支持 .config 或 .config-all)
+          CONFIG_FILE=""
+          if [ -f "N1-LEDE/.config" ]; then
+            CONFIG_FILE="N1-LEDE/.config"
+            echo "✓ Found .config file"
+          elif [ -f "N1-LEDE/.config-all" ]; then
+            CONFIG_FILE="N1-LEDE/.config-all"
+            echo "✓ Found .config-all file"
+          else
+            echo "::error:: No .config or .config-all file found!"
+            echo "Files in N1-LEDE:"
+            ls -la N1-LEDE/
+            exit 1
+          fi
+          
+          # 检查 diy.sh
           if [ ! -f "N1-LEDE/diy.sh" ]; then
             echo "::error:: N1-LEDE/diy.sh not found!"
-            ls -la N1-LEDE/ || echo "N1-LEDE directory is empty or inaccessible"
+            echo "Files in N1-LEDE:"
+            ls -la N1-LEDE/
             exit 1
           fi
           
-          # 复制文件
-          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/ || echo "No custom files directory"
-          cp N1-LEDE/.config openwrt/
+          # 复制自定义文件
+          if [ -d "N1-LEDE/files" ]; then
+            echo "Copying custom files..."
+            cp -r N1-LEDE/files openwrt/
+          else
+            echo "No custom files directory found"
+          fi
+          
+          # 复制配置文件
+          echo "Copying config file: $CONFIG_FILE"
+          cp "$CONFIG_FILE" openwrt/.config
+          
+          # 复制插件 (如果存在)
+          if [ -d "N1-LEDE/luci-app-alist" ]; then
+            echo "Copying luci-app-alist..."
+            mkdir -p openwrt/package/custom
+            cp -r N1-LEDE/luci-app-alist openwrt/package/custom/
+          fi
           
           # 运行自定义脚本
+          echo "Running diy.sh..."
           chmod +x N1-LEDE/diy.sh
           cd openwrt
           ../N1-LEDE/diy.sh
