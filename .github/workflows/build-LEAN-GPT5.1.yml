@@ -17,19 +17,6 @@ jobs:
     timeout-minutes: 480
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Verify repository structure
-      run: |
-        echo "仓库结构检查："
-        echo "=============================================================================="
-        ls -la
-        echo "------------------------------------------------------------------------------"
-        echo "N1-LEDE 目录内容："
-        ls -la N1-LEDE/ || echo "N1-LEDE 目录不存在!"
-        echo "=============================================================================="
-
     - name: Check initial disk space
       run: |
         echo "⚠️ GitHub Actions Runner 磁盘空间有限"
@@ -38,6 +25,7 @@ jobs:
         df -hT
         echo "=============================================================================="
 
+    # 先清理磁盘，再 checkout
     - name: Maximize build space
       uses: easimon/maximize-build-space@master
       with:
@@ -48,6 +36,24 @@ jobs:
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
+
+    # 在磁盘清理后再拉取代码
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Verify repository structure
+      run: |
+        echo "=============================================================================="
+        echo "验证仓库结构"
+        echo "=============================================================================="
+        echo "当前目录: $(pwd)"
+        echo ""
+        echo "一级目录内容:"
+        ls -la
+        echo ""
+        echo "N1-LEDE 目录内容:"
+        ls -la N1-LEDE/ || echo "❌ N1-LEDE 目录不存在!"
+        echo "=============================================================================="
 
     - name: Check disk space after cleanup
       run: |
@@ -106,38 +112,61 @@ jobs:
 
     - name: Load custom configuration
       run: |
-        echo "当前目录：$(pwd)"
-        echo "一级目录内容："; ls -l
-
+        echo "=============================================================================="
+        echo "加载自定义配置..."
+        echo "=============================================================================="
+        echo "当前工作目录: $(pwd)"
+        echo ""
+        
+        # 复制 files 目录
         if [ -d "N1-LEDE/files" ]; then
-          echo "复制 files 目录"
+          echo "✓ 复制 files 目录"
           cp -r N1-LEDE/files openwrt/files
+          echo "  files 目录内容:"
+          ls -la openwrt/files
         else
-          echo "⚠ files 目录不存在"
+          echo "⚠ files 目录不存在: N1-LEDE/files"
         fi
-
+        
+        echo ""
+        
+        # 复制配置文件
         if [ -f "N1-LEDE/.config-all" ]; then
-          echo "复制 .config-all 到 openwrt/.config"
+          echo "✓ 复制配置文件: N1-LEDE/.config-all -> openwrt/.config"
           cp N1-LEDE/.config-all openwrt/.config
+        elif [ -f "N1-LEDE/.config" ]; then
+          echo "✓ 使用 N1-LEDE/.config"
+          cp N1-LEDE/.config openwrt/.config
         else
-          echo "✗ config 文件不存在"
-          exit 2
+          echo "✗ 错误: 找不到配置文件!"
+          echo "  查找的路径: N1-LEDE/.config-all 或 N1-LEDE/.config"
+          echo "  当前目录内容:"
+          ls -la N1-LEDE/ || echo "N1-LEDE 目录不存在"
+          exit 1
         fi
-
+        
+        echo ""
+        
+        # 执行自定义脚本
         if [ -f "N1-LEDE/diy.sh" ]; then
-          echo "设置 diy.sh 可执行并运行"
+          echo "✓ 执行自定义脚本: N1-LEDE/diy.sh"
           chmod +x N1-LEDE/diy.sh
           cd openwrt
           bash ../N1-LEDE/diy.sh
         else
-          echo "⚠ diy.sh 文件不存在"
+          echo "⚠ 自定义脚本不存在: N1-LEDE/diy.sh"
         fi
+        
+        echo ""
+        echo "=============================================================================="
+        echo "配置加载完成"
+        echo "=============================================================================="
 
     - name: Generate configuration
       working-directory: ./openwrt
       run: |
         make defconfig
-        echo "生成的配置摘要:"
+        echo "生成的配置摘要 (前20行):"
         grep -v '^#' .config | grep '=' | head -20 || true
 
     - name: Download packages
