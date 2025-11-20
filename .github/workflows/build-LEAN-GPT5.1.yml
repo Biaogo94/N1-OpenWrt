@@ -1,0 +1,243 @@
+name: Build OpenWRT-LEAN for N1(GPT5.1)
+
+on:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: N1-LEDE/.config
+  DIY_SH: N1-LEDE/diy.sh
+  FILES: N1-LEDE/files
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 480
+
+    steps:
+    - name: Check machine configuration
+      run: |
+        echo "⚠️ 警告"
+        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+        echo "云编译建议取消勾选Node.js及其相关插件！"
+        echo "已知CPU型号（降序）：7763,8370C,8272CL,8171M,E5系列"
+        echo "--------------------------CPU信息--------------------------"
+        echo "CPU物理数量:$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+        echo -e "CPU核心及版本信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+        echo "--------------------------内存信息--------------------------"
+        echo "已安装内存详细信息："
+        sudo lshw -short -C memory | grep GiB || echo "内存信息不可用"
+        echo -e "\n"
+        echo "--------------------------硬盘信息--------------------------"
+        echo -e "硬盘数量：$(ls /dev/sd* 2>/dev/null | grep -v [1-9] | wc -l) \n"
+        echo "硬盘详情："
+        df -Th
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Before freeing up disk space
+      run: |
+        echo "清理前磁盘空间"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    - name: Free up disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: After freeing up disk space
+      run: |
+        echo "清理后磁盘空间"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    - name: Initialize environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get update
+        sudo -E apt-get -y install \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib \
+          g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 \
+          libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+          libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool \
+          llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf python3 \
+          python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools \
+          subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+          rename time gn
+        sudo -E apt-get -y autoremove --purge
+        sudo -E apt-get clean
+        sudo timedatectl set-timezone "$TZ"
+        echo "编译开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
+
+    - name: Clone source code
+      working-directory: ./
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        # 使用 sed 修改 feeds 配置
+        sed -i 's|^src-git luci.*|src-git luci https://github.com/coolsnowwolf/luci|g' feeds.conf.default
+        cat feeds.conf.default
+
+    - name: Cache OpenWrt
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/.ccache
+          openwrt/staging_dir
+          openwrt/build_dir/host
+          openwrt/build_dir/hostpkg
+        key: openwrt-cache-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
+        restore-keys: |
+          openwrt-cache-${{ env.REPO_BRANCH }}-
+          openwrt-cache-
+
+    - name: Update & Install feeds
+      working-directory: ./openwrt
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load custom config
+      run: |
+        [ -e $FILES ] && cp -r $FILES openwrt/files
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_SH
+        
+    - name: Generate configuration
+      working-directory: ./openwrt
+      run: |
+        make defconfig
+        cat .config
+
+    - name: Download packages
+      working-directory: ./openwrt
+      run: |
+        make download -j16
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile firmware
+      working-directory: ./openwrt
+      run: |
+        echo "开始编译: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "使用 $(nproc) 线程编译"
+        
+        # 配置 ccache
+        export USE_CCACHE=1
+        export CCACHE_DIR=$PWD/.ccache
+        ccache -M 10G
+        
+        # 首次尝试多线程编译
+        make -j$(nproc) || {
+          echo "多线程编译失败，清理后使用单线程重试..."
+          make clean
+          make -j1 V=s
+        }
+        
+        echo "编译完成: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "COMPILE_STATUS=success" >> $GITHUB_ENV
+        echo "COMPILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: Check compile result
+      if: env.COMPILE_STATUS == 'success'
+      working-directory: ./openwrt
+      run: |
+        ls -lh bin/targets/*/*/
+        echo "FIRMWARE_PATH=$PWD/bin/targets" >> $GITHUB_ENV
+
+    - name: Package OpenWrt firmware
+      if: env.COMPILE_STATUS == 'success' && !cancelled()
+      uses: unifreq/openwrt_packit@master
+      env:
+        OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-amlogic-mesongx-phicomm_n1-rootfs.tar.gz
+        KERNEL_VERSION_NAME: 5.15.176
+        KERNEL_AUTO_LATEST: false
+        PACKAGE_SOC: s905d
+        WHOAMI: fightroad
+        SW_FLOWOFFLOAD: 1
+        SFE_FLOW: 0
+
+    - name: Check package result
+      if: env.COMPILE_STATUS == 'success'
+      run: |
+        if [ -d "/opt/openwrt_packit/output" ] && [ "$(ls -A /opt/openwrt_packit/output)" ]; then
+          echo "PACKAGE_STATUS=success" >> $GITHUB_ENV
+          echo "PACKAGE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+          ls -lh /opt/openwrt_packit/output/
+        else
+          echo "打包输出目录为空"
+          echo "PACKAGE_STATUS=failed" >> $GITHUB_ENV
+        fi
+
+    - name: Upload firmware to artifact
+      if: env.COMPILE_STATUS == 'success' && !cancelled()
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_N1_${{ env.COMPILE_DATE }}
+        path: |
+          ${{ env.FIRMWARE_PATH }}/*/*
+          /opt/openwrt_packit/output/*
+        retention-days: 7
+        if-no-files-found: warn
+
+    - name: Upload firmware to release
+      if: env.PACKAGE_STATUS == 'success' && !cancelled()
+      uses: ncipollo/release-action@v1
+      with:
+        tag: OpenWrt_N1_${{ env.PACKAGE_DATE }}
+        name: N1固件 ${{ env.PACKAGE_DATE }}
+        artifacts: /opt/openwrt_packit/output/*
+        allowUpdates: true
+        token: ${{ secrets.GITHUB_TOKEN }}
+        body: |
+          ## 📦 N1 OpenWrt 固件
+          
+          **编译时间**: ${{ env.COMPILE_DATE }}
+          **基于**: Lean's LEDE ${{ env.REPO_BRANCH }}
+          **内核版本**: 5.15.176
+          
+          ### 📝 使用说明
+          - **默认IP**: 192.168.2.2
+          - **用户名**: root
+          - **密码**: password
+          
+          ### ⚠️ 注意事项
+          - 首次使用建议全新刷写
+          - 刷写前请备份重要数据
+          
+          ### 📥 下载说明
+          请根据您的设备型号选择对应的固件文件
+
+    - name: Delete old releases
+      uses: dev-drprasad/delete-older-releases@v0.3.4
+      if: env.PACKAGE_STATUS == 'success' && !cancelled()
+      with:
+        keep_latest: 10
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Clean up workspace
+      if: always()
+      run: |
+        echo "清理工作空间"
+        df -hT
+        rm -rf openwrt/build_dir openwrt/tmp || true
+        echo "清理完成"
+        df -hT
