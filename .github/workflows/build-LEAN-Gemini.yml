@@ -3,6 +3,14 @@ name: Build OpenWrt for N1 (Gemini)
 on:
   workflow_dispatch:
 
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: N1-LEDE/.config-all
+  DIY_SH: N1-LEDE/diy.sh
+  FILES: N1-LEDE/files
+  TZ: Asia/Shanghai
+
 concurrency:
   group: build-openwrt-n1
   cancel-in-progress: true
@@ -14,29 +22,14 @@ jobs:
     steps:
       - name: 1. Checkout repository
         uses: actions/checkout@main
-        with:
-          fetch-depth: 1
 
-      - name: 1.1 Debug - Verify repository structure
+      - name: 2. Show disk usage before cleanup
         run: |
-          echo "=== Current directory ==="
-          pwd
-          echo ""
-          echo "=== All files in workspace ==="
-          ls -laR
-          echo ""
-          echo "=== Checking for N1-LEDE ==="
-          if [ -d "N1-LEDE" ]; then
-            echo "✓ N1-LEDE directory found"
-            echo "Contents of N1-LEDE:"
-            ls -la N1-LEDE/
-          else
-            echo "✗ N1-LEDE directory NOT found"
-            echo "All directories:"
-            find . -type d -maxdepth 2
-          fi
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
 
-      - name: 2. Maximize build space
+      - name: 3. Maximize build space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 2048
@@ -47,10 +40,15 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      - name: 3. Show disk usage after cleanup
-        run: df -hT
+      - name: 4. Show disk usage after cleanup
+        run: |
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
 
-      - name: 4. Install dependencies
+      - name: 5. Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get -y install \
@@ -62,98 +60,27 @@ jobs:
             mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 \
             python3 python3-pip python3-pyelftools python3-setuptools qemu-utils rsync \
             scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim \
-            wget xmlto xxd zlib1g-dev gn
-          sudo timedatectl set-timezone Asia/Shanghai
+            wget xmlto xxd zlib1g-dev gn rename time
+          sudo apt-get -y autoremove --purge
+          sudo systemctl daemon-reload
+          sudo apt-get clean
+          sudo timedatectl set-timezone "$TZ"
+          sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
 
-      - name: 5. Clone OpenWrt source code
+      - name: 6. Clone OpenWrt source code
         run: |
-          if [ ! -d "openwrt" ]; then
-            git clone --depth 1 https://github.com/coolsnowwolf/lede -b master openwrt
-          else
-            echo "OpenWrt directory already exists"
-          fi
-      
-      - name: 6. Load custom files & Run DIY script
-        run: |
-          echo "=== Verifying N1-LEDE directory ==="
-          if [ ! -d "N1-LEDE" ]; then
-            echo "::error:: N1-LEDE directory not found!"
-            pwd
-            ls -la
-            exit 1
-          fi
-          
-          echo "=== Contents of N1-LEDE ==="
-          ls -la N1-LEDE/
-          
-          # 检查配置文件 (支持 .config 或 .config-all)
-          CONFIG_FILE=""
-          if [ -f "N1-LEDE/.config" ]; then
-            CONFIG_FILE="N1-LEDE/.config"
-            echo "✓ Found .config file"
-          elif [ -f "N1-LEDE/.config-all" ]; then
-            CONFIG_FILE="N1-LEDE/.config-all"
-            echo "✓ Found .config-all file"
-          else
-            echo "::error:: No .config or .config-all file found!"
-            echo "Files in N1-LEDE:"
-            ls -la N1-LEDE/
-            exit 1
-          fi
-          
-          # 检查 diy.sh
-          if [ ! -f "N1-LEDE/diy.sh" ]; then
-            echo "::error:: N1-LEDE/diy.sh not found!"
-            echo "Files in N1-LEDE:"
-            ls -la N1-LEDE/
-            exit 1
-          fi
-          
-          # 复制自定义文件
-          if [ -d "N1-LEDE/files" ]; then
-            echo "Copying custom files..."
-            cp -r N1-LEDE/files openwrt/
-          else
-            echo "No custom files directory found"
-          fi
-          
-          # 复制配置文件
-          echo "Copying config file: $CONFIG_FILE"
-          cp "$CONFIG_FILE" openwrt/.config
-          
-          # 复制插件 (如果存在)
-          if [ -d "N1-LEDE/luci-app-alist" ]; then
-            echo "Copying luci-app-alist..."
-            mkdir -p openwrt/package/custom
-            cp -r N1-LEDE/luci-app-alist openwrt/package/custom/
-          fi
-          
-          # 运行自定义脚本
-          echo "Running diy.sh..."
-          chmod +x N1-LEDE/diy.sh
+          git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          ../N1-LEDE/diy.sh
+          sed -i 's|https://github.com/coolsnowwolf/luci.git;openwrt-23.05|https://github.com/coolsnowwolf/luci|g' feeds.conf.default
 
-      - name: 7. Cache toolchain
-        uses: actions/cache@v4
+      - name: 7. Cache OpenWrt build
+        uses: stupidloud/cachewrtbuild@main
         with:
-          path: |
-            openwrt/staging_dir/toolchain-*
-            openwrt/staging_dir/host
-            openwrt/build_dir/host
-          key: ${{ runner.os }}-openwrt-toolchain-${{ hashFiles('openwrt/.config') }}
-          restore-keys: |
-            ${{ runner.os }}-openwrt-toolchain-
+          ccache: 'true'
+          mixkey: amlogic-${{ env.REPO_BRANCH }}
+          prefix: ${{ github.workspace }}/openwrt
 
-      - name: 8. Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
-        
-      - name: 9. Update and install feeds
+      - name: 8. Update and install feeds
         working-directory: ./openwrt
         run: |
           ./scripts/feeds update -a
@@ -161,11 +88,37 @@ jobs:
           echo "### Disk space after feeds install ###"
           df -hT
 
+      - name: 9. Load custom configuration
+        run: |
+          echo "=== Loading custom files ==="
+          [ -e $FILES ] && mv $FILES openwrt/files && echo "✓ Custom files moved" || echo "⚠ No custom files found"
+          
+          echo "=== Loading configuration file ==="
+          if [ -e $CONFIG_FILE ]; then
+            mv $CONFIG_FILE openwrt/.config
+            echo "✓ Config file moved: $CONFIG_FILE"
+          else
+            echo "✗ Config file not found: $CONFIG_FILE"
+            exit 1
+          fi
+          
+          echo "=== Running DIY script ==="
+          if [ -e $DIY_SH ]; then
+            chmod +x $DIY_SH
+            cd openwrt
+            $GITHUB_WORKSPACE/$DIY_SH
+            echo "✓ DIY script executed"
+          else
+            echo "✗ DIY script not found: $DIY_SH"
+            exit 1
+          fi
+
       - name: 10. Download packages
         working-directory: ./openwrt
         run: |
           make defconfig
           make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
           echo "### Disk space after download ###"
           df -hT
@@ -174,11 +127,12 @@ jobs:
         id: compile
         working-directory: ./openwrt
         run: |
+          chmod -R 755 .
+          echo "=== Starting compilation with $(nproc) threads ==="
           export USE_CCACHE=1
           export CCACHE_DIR=~/.ccache
-          echo "Starting firmware compilation..."
-          make -j$(nproc) || make -j1 V=s
-          echo "compile_status=$?" >> $GITHUB_OUTPUT
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "compile_status=success" >> $GITHUB_OUTPUT
           echo "### Disk space after compile ###"
           df -hT
 
@@ -191,31 +145,34 @@ jobs:
           retention-days: 7
 
       - name: 13. Clean up build artifacts
-        if: steps.compile.outputs.compile_status == '0'
+        if: steps.compile.outputs.compile_status == 'success'
         working-directory: ./openwrt
         run: |
-          echo "Firmware compiled. Cleaning up build artifacts..."
+          echo "Cleaning up build artifacts..."
           rm -rf build_dir/target-*
           rm -rf tmp
           echo "### Disk space after cleanup ###"
           df -hT
 
       - name: 14. Set packaging date
-        if: steps.compile.outputs.compile_status == '0'
+        if: steps.compile.outputs.compile_status == 'success'
         run: |
           echo "PACKAGED_OUTPUTDATE=$(date +%Y.%m.%d_%H%M)" >> $GITHUB_ENV
 
       - name: 15. Package the firmware
-        if: steps.compile.outputs.compile_status == '0'
+        if: steps.compile.outputs.compile_status == 'success'
         uses: unifreq/openwrt_packit@master
         env:
           OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/openwrt-armvirt-64-generic-rootfs.tar.gz
           PACKAGE_SOC: s905d
           WHOAMI: fightroad
-          KERNEL_AUTO_LATEST: true
+          KERNEL_VERSION_NAME: 5.15.176
+          KERNEL_AUTO_LATEST: false
+          SW_FLOWOFFLOAD: 1
+          SFE_FLOW: 0
 
       - name: 16. Set packaging status
-        if: steps.compile.outputs.compile_status == '0'
+        if: steps.compile.outputs.compile_status == 'success'
         run: |
           if [ -d "/opt/openwrt_packit/output" ] && [ "$(ls -A /opt/openwrt_packit/output)" ]; then
             echo "PACKAGED_STATUS=success" >> $GITHUB_ENV
@@ -238,11 +195,22 @@ jobs:
             📅 编译时间: ${{ env.PACKAGED_OUTPUTDATE }}
             🔧 SOC: s905d
             📦 打包脚本: unifreq/openwrt_packit
+            🔥 基于 Lean 源码: https://github.com/coolsnowwolf/lede
+            
+            ### 基本信息
+            - IP: 192.168.2.2
+            - 账户: root
+            - 密码: password
             
             ### 安装方法
             1. 将固件写入 U 盘
             2. 插入 N1 盒子并从 U 盘启动
             3. 运行 `openwrt-install-amlogic` 安装到 eMMC
+            
+            ### 注意事项
+            - 首次使用建议全新刷写
+            - 内核版本: 5.15.176
+            - 已启用 SW_FLOWOFFLOAD
 
       - name: 18. Delete old releases
         uses: dev-drprasad/delete-older-releases@v0.3.4
