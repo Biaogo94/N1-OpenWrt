@@ -15,6 +15,27 @@ jobs:
     steps:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: 1.1 Verify directory structure
+        run: |
+          echo "=== Current working directory ==="
+          pwd
+          echo ""
+          echo "=== Directory contents ==="
+          ls -la
+          echo ""
+          echo "=== Checking N1-LEDE directory ==="
+          if [ -d "N1-LEDE" ]; then
+            echo "✓ N1-LEDE found"
+            ls -la N1-LEDE/
+          else
+            echo "✗ N1-LEDE NOT found"
+            echo "Available directories:"
+            find . -maxdepth 2 -type d
+            exit 1
+          fi
 
       - name: 2. Maximize build space
         uses: easimon/maximize-build-space@master
@@ -55,27 +76,27 @@ jobs:
       
       - name: 6. Load custom files & Run DIY script
         run: |
-          if [ ! -d "N1-LEDE" ]; then
-            echo "::error:: N1-LEDE directory not found!"
-            exit 1
-          fi
-          
-          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/ || echo "No custom files found"
-          
+          # 验证必需文件
           if [ ! -f "N1-LEDE/.config" ]; then
-            echo "::error:: .config file not found!"
+            echo "::error:: N1-LEDE/.config file not found!"
+            ls -la N1-LEDE/ || echo "N1-LEDE directory is empty or inaccessible"
             exit 1
           fi
+          
+          if [ ! -f "N1-LEDE/diy.sh" ]; then
+            echo "::error:: N1-LEDE/diy.sh not found!"
+            ls -la N1-LEDE/ || echo "N1-LEDE directory is empty or inaccessible"
+            exit 1
+          fi
+          
+          # 复制文件
+          [ -d "N1-LEDE/files" ] && cp -r N1-LEDE/files openwrt/ || echo "No custom files directory"
           cp N1-LEDE/.config openwrt/
           
-          if [ -f "N1-LEDE/diy.sh" ]; then
-            chmod +x N1-LEDE/diy.sh
-            cd openwrt
-            ../N1-LEDE/diy.sh
-          else
-            echo "::error:: diy.sh not found!"
-            exit 1
-          fi
+          # 运行自定义脚本
+          chmod +x N1-LEDE/diy.sh
+          cd openwrt
+          ../N1-LEDE/diy.sh
 
       - name: 7. Cache toolchain
         uses: actions/cache@v4
