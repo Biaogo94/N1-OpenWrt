@@ -13,60 +13,51 @@ env:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: ubuntu-22.04
     timeout-minutes: 480
 
     steps:
-    - name: Check machine configuration
-      run: |
-        echo "⚠️ 警告"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo "云编译建议取消勾选Node.js及其相关插件！"
-        echo "已知CPU型号（降序）：7763,8370C,8272CL,8171M,E5系列"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量:$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo -e "CPU核心及版本信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        sudo lshw -short -C memory | grep GiB || echo "内存信息不可用"
-        echo -e "\n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo -e "硬盘数量：$(ls /dev/sd* 2>/dev/null | grep -v [1-9] | wc -l) \n"
-        echo "硬盘详情："
-        df -Th
-
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Before freeing up disk space
+    - name: Check initial disk space
       run: |
-        echo "清理前磁盘空间"
+        echo "⚠️ GitHub Actions Runner 磁盘空间有限"
+        echo "初始磁盘空间："
         echo "=============================================================================="
         df -hT
         echo "=============================================================================="
 
-    - name: Free up disk space
-      uses: jlumbroso/free-disk-space@main
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
       with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
+        root-reserve-mb: 2048
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
 
-    - name: After freeing up disk space
+    - name: Check disk space after cleanup
       run: |
-        echo "清理后磁盘空间"
+        echo "清理后磁盘空间："
         echo "=============================================================================="
         df -hT
         echo "=============================================================================="
+        echo "--------------------------CPU信息--------------------------"
+        echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+        echo "CPU核心信息: $(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c)"
+        echo "--------------------------内存信息--------------------------"
+        free -h
 
     - name: Initialize environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
+        docker rmi $(docker images -q) 2>/dev/null || true
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android 2>/dev/null || true
+        sudo -E apt-get -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* moby* snap* 2>/dev/null || true
         sudo -E apt-get update
         sudo -E apt-get -y install \
           ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
@@ -81,29 +72,21 @@ jobs:
         sudo -E apt-get -y autoremove --purge
         sudo -E apt-get clean
         sudo timedatectl set-timezone "$TZ"
-        echo "编译开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "编译环境初始化完成: $(date '+%Y-%m-%d %H:%M:%S')"
 
     - name: Clone source code
-      working-directory: ./
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        # 使用 sed 修改 feeds 配置
         sed -i 's|^src-git luci.*|src-git luci https://github.com/coolsnowwolf/luci|g' feeds.conf.default
-        cat feeds.conf.default
+        echo "源码克隆完成"
 
-    - name: Cache OpenWrt
-      uses: actions/cache@v4
+    - name: Cache
+      uses: klever1988/cachewrtbuild@main
       with:
-        path: |
-          openwrt/.ccache
-          openwrt/staging_dir
-          openwrt/build_dir/host
-          openwrt/build_dir/hostpkg
-        key: openwrt-cache-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default') }}
-        restore-keys: |
-          openwrt-cache-${{ env.REPO_BRANCH }}-
-          openwrt-cache-
+        ccache: 'true'
+        mixkey: 'n1-openwrt'
+        prefix: ${{ github.workspace }}/openwrt
 
     - name: Update & Install feeds
       working-directory: ./openwrt
@@ -111,7 +94,7 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load custom config
+    - name: Load custom configuration
       run: |
         [ -e $FILES ] && cp -r $FILES openwrt/files
         [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
@@ -123,7 +106,7 @@ jobs:
       working-directory: ./openwrt
       run: |
         make defconfig
-        cat .config
+        grep -v '^#' .config | grep '=' || true
 
     - name: Download packages
       working-directory: ./openwrt
@@ -132,24 +115,20 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    - name: Check disk space before compile
+      run: |
+        echo "编译前磁盘空间："
+        df -hT
+
     - name: Compile firmware
       working-directory: ./openwrt
       run: |
         echo "开始编译: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "使用 $(nproc) 线程编译"
-        
-        # 配置 ccache
-        export USE_CCACHE=1
-        export CCACHE_DIR=$PWD/.ccache
-        ccache -M 10G
-        
-        # 首次尝试多线程编译
-        make -j$(nproc) || {
-          echo "多线程编译失败，清理后使用单线程重试..."
-          make clean
+        make -j$(($(nproc) + 1)) V=s || {
+          echo "多线程编译失败，使用单线程重试..."
           make -j1 V=s
         }
-        
         echo "编译完成: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "COMPILE_STATUS=success" >> $GITHUB_ENV
         echo "COMPILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -158,8 +137,18 @@ jobs:
       if: env.COMPILE_STATUS == 'success'
       working-directory: ./openwrt
       run: |
-        ls -lh bin/targets/*/*/
+        echo "编译产物："
+        ls -lh bin/targets/*/*/ || echo "未找到编译产物"
         echo "FIRMWARE_PATH=$PWD/bin/targets" >> $GITHUB_ENV
+
+    - name: Organize firmware files
+      if: env.COMPILE_STATUS == 'success'
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE_DIR=$PWD" >> $GITHUB_ENV
+        echo "整理后的文件："
+        ls -lh
 
     - name: Package OpenWrt firmware
       if: env.COMPILE_STATUS == 'success' && !cancelled()
@@ -176,13 +165,14 @@ jobs:
     - name: Check package result
       if: env.COMPILE_STATUS == 'success'
       run: |
-        if [ -d "/opt/openwrt_packit/output" ] && [ "$(ls -A /opt/openwrt_packit/output)" ]; then
+        if [ -d "/opt/openwrt_packit/output" ] && [ -n "$(ls -A /opt/openwrt_packit/output 2>/dev/null)" ]; then
           echo "PACKAGE_STATUS=success" >> $GITHUB_ENV
-          echo "PACKAGE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+          echo "PACKAGE_DATE=$(date +"%Y.%m.%d_%H%M")" >> $GITHUB_ENV
+          echo "打包成功，输出文件："
           ls -lh /opt/openwrt_packit/output/
         else
-          echo "打包输出目录为空"
           echo "PACKAGE_STATUS=failed" >> $GITHUB_ENV
+          echo "打包失败或输出目录为空"
         fi
 
     - name: Upload firmware to artifact
@@ -191,53 +181,62 @@ jobs:
       with:
         name: OpenWrt_N1_${{ env.COMPILE_DATE }}
         path: |
-          ${{ env.FIRMWARE_PATH }}/*/*
-          /opt/openwrt_packit/output/*
+          ${{ env.FIRMWARE_DIR }}/*
         retention-days: 7
         if-no-files-found: warn
+
+    - name: Upload packaged firmware to artifact
+      if: env.PACKAGE_STATUS == 'success' && !cancelled()
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_N1_Packaged_${{ env.COMPILE_DATE }}
+        path: /opt/openwrt_packit/output/*
+        retention-days: 7
 
     - name: Upload firmware to release
       if: env.PACKAGE_STATUS == 'success' && !cancelled()
       uses: ncipollo/release-action@v1
       with:
         tag: OpenWrt_N1_${{ env.PACKAGE_DATE }}
-        name: N1固件 ${{ env.PACKAGE_DATE }}
+        name: N1 固件 ${{ env.PACKAGE_DATE }}
         artifacts: /opt/openwrt_packit/output/*
         allowUpdates: true
         token: ${{ secrets.GITHUB_TOKEN }}
         body: |
-          ## 📦 N1 OpenWrt 固件
+          ## 📦 斐讯 N1 OpenWrt 固件
           
-          **编译时间**: ${{ env.COMPILE_DATE }}
-          **基于**: Lean's LEDE ${{ env.REPO_BRANCH }}
+          **编译时间**: ${{ env.PACKAGE_DATE }}
+          **固件源码**: [Lean's LEDE](${{ env.REPO_URL }})
+          **源码分支**: ${{ env.REPO_BRANCH }}
           **内核版本**: 5.15.176
+          **SOC 型号**: S905D
           
           ### 📝 使用说明
-          - **默认IP**: 192.168.2.2
+          - **默认 IP**: 192.168.2.2
           - **用户名**: root
           - **密码**: password
           
           ### ⚠️ 注意事项
           - 首次使用建议全新刷写
           - 刷写前请备份重要数据
+          - 刷写方法请参考相关教程
           
-          ### 📥 下载说明
-          请根据您的设备型号选择对应的固件文件
+          ### 📥 文件说明
+          - `*-s905d-*.img.gz`: N1 专用固件镜像（压缩包）
+          - 下载后解压得到 .img 文件
+          - 使用 balenaEtcher 或 USBwriter 等工具写入 U盘/TF卡
 
-    - name: Delete old releases
-      uses: dev-drprasad/delete-older-releases@v0.3.4
+    - name: Delete older releases
       if: env.PACKAGE_STATUS == 'success' && !cancelled()
+      uses: dev-drprasad/delete-older-releases@v0.3.4
       with:
         keep_latest: 10
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Clean up workspace
+    - name: Final disk space check
       if: always()
       run: |
-        echo "清理工作空间"
-        df -hT
-        rm -rf openwrt/build_dir openwrt/tmp || true
-        echo "清理完成"
+        echo "最终磁盘空间："
         df -hT
